@@ -3,15 +3,14 @@
 	"id": "anvilregionanalyzer",
 	"version": "${version}",
 	"name": "Anvil Region Analyzer",
-	"description": "This is an example description! Tell everyone what your mod is about!",
+	"description": "Tool to analyze & profile the Minecraft Region file format",
 	"authors": [
-		"Me!"
+		"Michaili K"
 	],
 	"contact": {
-		"homepage": "https://fabricmc.net/",
-		"sources": "https://github.com/FabricMC/fabric-example-mod"
+		"sources": "https://github.com/MichailiK/anvilregionanalyzer"
 	},
-	"license": "CC0-1.0",
+	"license": "GPL-3.0-only",
 	"icon": "assets/anvilregionanalyzer/icon.png",
 	"environment": "*",
 	"entrypoints": {

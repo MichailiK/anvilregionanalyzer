@@ -26,25 +26,23 @@ public class AnvilRegionProfiler {
     private static final ConcurrentMap<ServerWorld, ConcurrentHashMap<Long, ChunkProfilingMetadata>> chunkMetadata = new ConcurrentHashMap<>();
 
     public static void startProfiling(ServerWorld world) {
-        if (worldsProfiling.containsKey(world))
-            return;
+        if (worldsProfiling.containsKey(world)) return;
         worldsProfiling.put(world, new ArrayList<>());
         chunkMetadata.put(world, new ConcurrentHashMap<>());
         var worker = tryGetStorageIoWorker(world);
-        ((WorldAware)(Object) worker.storage).setWorld(world);
+        ((WorldAware) (Object) worker.storage).setWorld(world);
     }
 
     public static void stopProfiling(ServerWorld world) {
-        if (!worldsProfiling.containsKey(world))
-            return;
+        if (!worldsProfiling.containsKey(world)) return;
         for (ServerPlayerEntity player : worldsProfiling.get(world)) {
             if (player.getServerWorld() == world)
-                ServerPlayNetworking.send(player, NetworkingConstants.ANVIL_PROFILING_STOP, PacketByteBufs.empty());
+                ServerPlayNetworking.send(player, new Networking.AnvilProfilingStop());
         }
         worldsProfiling.remove(world);
         chunkMetadata.remove(world);
         var worker = tryGetStorageIoWorker(world);
-        ((WorldAware)(Object) worker.storage).setWorld(null);
+        ((WorldAware) (Object) worker.storage).setWorld(null);
     }
 
     public static boolean toggleProfiling(ServerWorld world) {
@@ -57,10 +55,11 @@ public class AnvilRegionProfiler {
         }
     }
 
-    /** Called by the {@link RegionBasedStorageMixins} mixin to make the profiler aware that a chunk was saved */
+    /**
+     * Called by the {@link RegionBasedStorageMixins} mixin to make the profiler aware that a chunk was saved
+     */
     public static void onChunkWrite(ChunkPos pos, ServerWorld world, long saveDuration) {
-        if (!worldsProfiling.containsKey(world))
-            return;
+        if (!worldsProfiling.containsKey(world)) return;
         var lastSaveTime = chunkMetadata.get(world);
         var chunkLong = ChunkPos.toLong(pos.x, pos.z);
         lastSaveTime.put(chunkLong, new ChunkProfilingMetadata(System.nanoTime(), saveDuration));
@@ -68,8 +67,7 @@ public class AnvilRegionProfiler {
 
     public static void init() {
         ServerWorldEvents.UNLOAD.register((server, world) -> {
-            if (!worldsProfiling.containsKey(world))
-                return;
+            if (!worldsProfiling.containsKey(world)) return;
             LOGGER.info("Stopping Anvil profiling for {} due to world being unloaded", world.getRegistryKey().getValue().toString());
             stopProfiling(world);
         });
@@ -83,13 +81,14 @@ public class AnvilRegionProfiler {
                     // Notify (newly joined) clients that profiling is active if it is active
                     if (!playerList.contains(player) && player.hasPermissionLevel(4)) {
                         playerList.add(player);
-                        ServerPlayNetworking.send(player, NetworkingConstants.ANVIL_PROFILING_START, PacketByteBufs.empty());
+                        ServerPlayNetworking.send(player, new Networking.AnvilProfilingStart());
                     }
 
                     // Notify (deopped) clients that profiling has stopped if they no longer have permission to use it
                     if (playerList.contains(player) && !player.hasPermissionLevel(4)) {
                         playerList.remove(player);
-                        ServerPlayNetworking.send(player, NetworkingConstants.ANVIL_PROFILING_STOP, PacketByteBufs.empty());
+                        ServerPlayNetworking.send(player, new Networking.AnvilProfilingStop());
+                        return;
                     }
 
                     // At this point, profiling is enabled, the player has permissions for it, and the player client should be aware of it
@@ -109,36 +108,33 @@ public class AnvilRegionProfiler {
                     long currentTime = System.nanoTime();
 
                     // Let's get packing now!
-                    var buf = PacketByteBufs.create();
-                    buf.writeInt(playerLoc.getRegionX());
-                    buf.writeInt(playerLoc.getRegionZ());
+                    var regionX = playerLoc.getRegionX();
+                    var regionZ = playerLoc.getRegionZ();
+                    long regionFileSize;
                     try {
-                        buf.writeLong(regionFile.channel.size());
+                        regionFileSize = regionFile.channel.size();
                     } catch (IOException e) {
                         LOGGER.error("Failed to get size of region location (" + playerLoc.getRegionX() + " " + playerLoc.getRegionZ() + ")", e);
                         return;
                     }
+
+                    var chunkMetadata = new Networking.AnvilProfilingStream.ChunkMetadata[1024];
 
                     for (int x = 0; x < 32; x++) {
                         for (int y = 0; y < 32; y++) {
                             var index = x + (y * 32);
 
                             var globalChunkPos = new ChunkPos(playerLoc.getRegionX() * 32 + x, playerLoc.getRegionZ() * 32 + y);
-
                             int sectorData = regionFile.sectorData.get(index);
 
                             if (sectorData == 0) {
-                                // no data available, send a 0 & continue
-                                buf.writeInt(0);
+                                // no data available, leave the entry null & continue.
                                 continue;
                             }
 
                             // Offset is expected to start at 2, as the first 2 sectors are reserved for the header.
                             int regionOffset = RegionFile.getOffset(sectorData);
                             int regionSize = RegionFile.getSize(sectorData);
-
-                            buf.writeInt(regionOffset);
-                            buf.writeInt(regionSize);
 
                             ByteBuffer chunkHeaderBuffer = ByteBuffer.allocate(5);
                             try {
@@ -151,24 +147,22 @@ public class AnvilRegionProfiler {
                             int chunkLength = chunkHeaderBuffer.getInt();
                             byte chunkCompressionType = chunkHeaderBuffer.get();
 
-                            buf.writeInt(chunkLength);
-                            buf.writeByte(chunkCompressionType);
 
                             var chunkProfilingMetadata = AnvilRegionProfiler.chunkMetadata.get(world);
                             var chunkMetadataEntry = chunkProfilingMetadata.get(globalChunkPos.toLong());
-                            if (chunkMetadataEntry == null) {
-                                // Chunk has never been saved here.
-                                buf.writeInt(-1);
-                                buf.writeLong(-1);
-                            } else {
-                                // convert nanoseconds to milliseconds
-                                buf.writeInt((int) Math.min(Integer.MAX_VALUE, (currentTime - chunkMetadataEntry.lastSaveTime) / 1_000_000L));
-                                buf.writeLong(currentTime - chunkMetadataEntry.lastSaveDuration);
+
+                            int lastSaveTime = -1;
+                            long lastSaveDuration = -1;
+                            if (chunkMetadataEntry != null) {
+                                lastSaveTime = (int) Math.min(Integer.MAX_VALUE, (currentTime - chunkMetadataEntry.lastSaveTime) / 1_000_000L);
+                                lastSaveDuration = currentTime - chunkMetadataEntry.lastSaveDuration;
                             }
+
+                            chunkMetadata[index] = new Networking.AnvilProfilingStream.ChunkMetadata(regionOffset, regionSize, chunkLength, chunkCompressionType, lastSaveTime, lastSaveDuration);
                         }
                     }
 
-                    ServerPlayNetworking.send(player, NetworkingConstants.ANVIL_PROFILING_REGION_STREAM, buf);
+                    ServerPlayNetworking.send(player, new Networking.AnvilProfilingStream(regionX, regionZ, regionFileSize, chunkMetadata));
 
                 });
 
@@ -187,5 +181,6 @@ public class AnvilRegionProfiler {
     }
 
     // TODO might wanna extend this to not just be last save time, but also last (de-)compression durations?
-    private record ChunkProfilingMetadata(long lastSaveTime, long lastSaveDuration) {}
+    private record ChunkProfilingMetadata(long lastSaveTime, long lastSaveDuration) {
+    }
 }

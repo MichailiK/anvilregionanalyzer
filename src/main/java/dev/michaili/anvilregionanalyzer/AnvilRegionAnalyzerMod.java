@@ -19,5 +19,6 @@ public class AnvilRegionAnalyzerMod implements ModInitializer {
 
         AnvilRegionCommand.init();
         AnvilRegionProfiler.init();
+        Networking.init();
     }
 }
